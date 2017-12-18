@@ -99,6 +99,7 @@ uint32_t rk32_via_tfp0(uint64_t kaddr) {
   kern_return_t err;
   uint32_t val = 0;
   mach_vm_size_t outsize = 0;
+	
   err = mach_vm_read_overwrite(tfp0,
                                (mach_vm_address_t)kaddr,
                                (mach_vm_size_t)sizeof(uint32_t),

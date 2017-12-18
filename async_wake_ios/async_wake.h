@@ -3,7 +3,6 @@
 
 #include <stdio.h>
 
-mach_port_t go(void);
-uid_t get_root ();
+mach_port_t get_tfp0(mach_port_t*uc);
 
 #endif /* async_wake_h */
